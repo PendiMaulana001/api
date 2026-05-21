@@ -1,5 +1,4 @@
 from flask import Flask, request, jsonify
-from flask_cors import CORS
 import pandas as pd
 import numpy as np
 import pickle
@@ -7,6 +6,7 @@ from pathlib import Path
 import datetime
 import os
 from sklearn.preprocessing import LabelEncoder
+from flask_cors import CORS
 
 app = Flask(__name__)
 CORS(app)
@@ -19,140 +19,87 @@ MODEL_MARKOV_PKL = BASE_DIR / "model_markov.pkl"
 def now_iso():
     return datetime.datetime.now().isoformat(sep=" ", timespec="seconds")
 
-# ================= LOAD MODEL =================
-def load_models():
-    nb_data = None
-    markov = None
-
+# ================= SAFE LOAD =================
+def safe_load_models():
     try:
+        nb_data = None
+        markov = None
+
         if MODEL_NB_PKL.exists():
             with open(MODEL_NB_PKL, "rb") as f:
                 nb_data = pickle.load(f)
-            print(f"[{now_iso()}] model_naivebayes.pkl loaded.")
+            print("NB loaded")
         else:
-            print(f"[{now_iso()}] WARNING: model_naivebayes.pkl tidak ditemukan")
-    except Exception as e:
-        print(f"[{now_iso()}] ERROR load NB:", e)
+            print("NB file tidak ada")
 
-    try:
         if MODEL_MARKOV_PKL.exists():
             with open(MODEL_MARKOV_PKL, "rb") as f:
                 markov = pickle.load(f)
-            print(f"[{now_iso()}] model_markov.pkl loaded.")
+            print("Markov loaded")
         else:
-            print(f"[{now_iso()}] WARNING: model_markov.pkl tidak ditemukan")
+            print("Markov file tidak ada")
+
+        return nb_data, markov
+
     except Exception as e:
-        print(f"[{now_iso()}] ERROR load Markov:", e)
+        print("ERROR LOAD MODEL:", e)
+        return None, None
 
-    return nb_data, markov
+# ❗ JANGAN crash saat start
+NB_DATA, TRANSITION_MATRIX = None, None
 
-NB_DATA, TRANSITION_MATRIX = load_models()
-
-# ================= SETUP MODEL =================
-if NB_DATA:
-    MODELS = NB_DATA.get("models", {})
-    LABLES = NB_DATA.get("label_encoders", {})
-    FEATURE_ORDER = NB_DATA.get("fitur", [])
-    TARGETS = NB_DATA.get("target", [])
-else:
-    MODELS = {}
-    LABLES = {}
-    FEATURE_ORDER = []
-    TARGETS = []
-
-# ================= LOAD DATA XLSX =================
-DS_MAP = None
-if DATA_XLSX.exists():
+# ================= LOAD DATA (SAFE) =================
+def load_excel():
     try:
-        DS_MAP = pd.read_excel(DATA_XLSX)
-        DS_MAP.columns = [c.strip() for c in DS_MAP.columns]
-        print(f"[{now_iso()}] data.xlsx loaded")
+        if DATA_XLSX.exists():
+            df = pd.read_excel(DATA_XLSX)
+            df.columns = [c.strip() for c in df.columns]
+            return df
     except Exception as e:
-        print(f"[{now_iso()}] ERROR baca excel:", e)
+        print("ERROR EXCEL:", e)
+    return None
 
-# ================= ENCODE INPUT =================
-def encode_input(sample_input: dict):
-    if not FEATURE_ORDER:
-        vals = [len(str(v)) for v in sample_input.values()]
-        return np.array(vals).reshape(1, -1)
-
-    row = []
-    for col in FEATURE_ORDER:
-        val = str(sample_input.get(col, "")).strip()
-        if col in LABLES:
-            le: LabelEncoder = LABLES[col]
-            try:
-                row.append(int(le.transform([val])[0]))
-            except:
-                row.append(0)
-        else:
-            try:
-                row.append(float(val))
-            except:
-                row.append(len(val))
-    return np.array(row).reshape(1, -1)
-
-# ================= PREDICT =================
-def predict_nb_and_markov(sample_input):
-    result = {
-        "status": "ok",
-        "hasil_naive_bayes": {},
-        "hasil_markov": {}
-    }
-
-    try:
-        X = encode_input(sample_input)
-
-        # ===== NAIVE BAYES =====
-        if MODELS:
-            preds = {}
-            for t in TARGETS:
-                model = MODELS.get(t)
-                if model:
-                    preds[t] = str(model.predict(X)[0])
-            result["hasil_naive_bayes"] = preds
-        else:
-            result["hasil_naive_bayes"] = {
-                "nama obat": "BioNeem",
-                "dosis": "10 ml/liter"
-            }
-
-        # ===== MARKOV =====
-        result["hasil_markov"] = {
-            "info": "markov jalan (simplified)"
-        }
-
-    except Exception as e:
-        print(f"[{now_iso()}] ERROR predict:", e)
-        result["status"] = "error"
-
-    return result
+DS_MAP = load_excel()
 
 # ================= ROUTES =================
+
 @app.route("/")
 def home():
     return "API ManggaCare aktif 🚀"
 
+@app.route("/feature_order")
+def feature():
+    return jsonify({
+        "feature_order": [],
+        "model_loaded": NB_DATA is not None
+    })
+
 @app.route("/predict", methods=["POST"])
-def api_predict():
+def predict():
+    global NB_DATA, TRANSITION_MATRIX
+
+    # 🔥 load model saat dipakai (bukan saat start)
+    if NB_DATA is None:
+        NB_DATA, TRANSITION_MATRIX = safe_load_models()
+
     data = request.get_json() or {}
     sample = data.get("sample", {})
 
-    if not isinstance(sample, dict):
-        return jsonify({"error": "format salah"}), 400
+    try:
+        return jsonify({
+            "status": "ok",
+            "message": "API jalan + model dicoba load",
+            "sample": sample,
+            "model_loaded": NB_DATA is not None
+        })
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "error": str(e)
+        })
 
-    result = predict_nb_and_markov(sample)
-    return jsonify(result)
-
-@app.route("/feature_order", methods=["GET"])
-def api_feature():
-    return jsonify({
-        "feature_order": FEATURE_ORDER,
-        "model_loaded": bool(MODELS)
-    })
-
-# ================= RUN SERVER =================
+# ================= RUN =================
 if __name__ == "__main__":
-    print("🚀 Starting API ManggaCare...")
+    print("🚀 Starting ManggaCare API...")
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
